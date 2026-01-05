@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+.env
+retail-gen-frontend/node_modules/
+retail-gen-frontend/.next/
+*.pyc
