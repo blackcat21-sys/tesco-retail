@@ -74,7 +74,7 @@ Retail-Hackathon/
 
 ### 1️⃣ Clone the repository
 ```bash
-git clone https://github.com/your-username/retailgen-studio.git
+git clone https://github.com/blackcat21-sys/tesco-retail
 cd retailgen-studio
 ```
 
