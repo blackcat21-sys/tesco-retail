@@ -1,0 +1,757 @@
+'use client';
+
+import React, { useEffect, useRef, useState } from 'react';
+import * as fabric from 'fabric';
+
+// --- CONFIGURATION ---
+const RATIOS = {
+  STORY: { width: 350, height: 600, name: 'Story (9:16)' },
+  SQUARE: { width: 500, height: 500, name: 'Square (1:1)' },
+  LANDSCAPE: { width: 600, height: 340, name: 'Wide (16:9)' },
+  AD_191: { width: 1200, height: 628, name: 'Ad (1.9:1)' }, 
+  CUSTOM: { width: 400, height: 400, name: 'Custom' },
+};
+
+// --- ICONS ---
+const UploadIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>;
+const TextIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>;
+const ScissorsIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>;
+const SparklesIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L12 3Z"/></svg>;
+const ShieldAlertIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>;
+const CheckCircleIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>;
+const TrashIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>;
+const LayersIcon = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>;
+
+// Type for selected object
+interface SelectedObject extends fabric.Object {
+  type?: string;
+  fill?: string;
+  fontSize?: number;
+  fontWeight?: string;
+  fontStyle?: string;
+  fontFamily?: string;
+  top?: number;
+}
+
+function Home() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [fabricCanvas, setFabricCanvas] = useState<fabric.Canvas | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // State
+  const [prompt, setPrompt] = useState(""); 
+  const [isLoading, setIsLoading] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+  const [isCompliant, setIsCompliant] = useState(false); 
+  const [selectedObj, setSelectedObj] = useState<SelectedObject | null>(null);
+
+  // Canvas Settings
+  const [currentRatio, setCurrentRatio] = useState(RATIOS.STORY);
+  const [customWidth, setCustomWidth] = useState(400);
+  const [customHeight, setCustomHeight] = useState(400);
+
+ // --- INITIALIZE CANVAS ---
+  useEffect(() => {
+    if (canvasRef.current && !fabricCanvas) {
+      const canvas = new fabric.Canvas(canvasRef.current, {
+        height: currentRatio.height, 
+        width: currentRatio.width, 
+        backgroundColor: '#ffffff',
+      });
+
+      // --- UPDATED LISTENERS ---
+      const updateSelection = () => {
+         const active = canvas.getActiveObject();
+         setSelectedObj(active as SelectedObject || null);
+         
+         if (isCompliant) {
+             setIsCompliant(false);
+             showStatus("Changes detected. Re-check required.", "warning");
+         }
+      };
+
+      // 1. Selection Events
+      canvas.on('selection:created', updateSelection);
+      canvas.on('selection:updated', updateSelection);
+      canvas.on('selection:cleared', () => setSelectedObj(null));
+      
+      // 2. Modification Events
+      canvas.on('object:modified', updateSelection);
+      canvas.on('object:added', updateSelection);
+      canvas.on('object:removed', updateSelection);
+
+      // Add Zones
+      addZones(canvas, currentRatio.width, currentRatio.height, currentRatio.name);
+      
+      setFabricCanvas(canvas);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasRef]); 
+
+  // --- HELPER: SHOW STATUS ---
+  const showStatus = (msg: string, type: 'info' | 'success' | 'error' | 'warning' = 'info') => {
+    setStatusMsg(msg);
+    setTimeout(() => setStatusMsg(""), 5000);
+  };
+
+  // --- HELPER: RE-DRAW ZONES (Top & Bottom) ---
+  const addZones = (canvas: fabric.Canvas, width: number, height: number, ratioName: string) => {
+      // 1. Remove old zones first
+      canvas.getObjects().forEach(obj => {
+          if ((obj as any).id === 'zone') canvas.remove(obj);
+      });
+
+      // 2. STOP if this is not a Story (9:16)
+      if (ratioName !== 'Story (9:16)') return;
+
+      // 3. Add Zones if Story
+      const topZone = new fabric.Rect({
+        top: 0, left: 0, width: width, height: 200,
+        fill: 'rgba(220, 38, 38, 0.15)', // Red tint
+        selectable: false, evented: false,
+        // @ts-ignore
+        id: 'zone' 
+      });
+
+      const bottomZone = new fabric.Rect({
+        top: height - 250, left: 0, width: width, height: 250,
+        fill: 'rgba(220, 38, 38, 0.15)', 
+        selectable: false, evented: false,
+        // @ts-ignore
+        id: 'zone' 
+      });
+
+      const topLabel = new fabric.Text('HEADER ZONE - NO TEXT', {
+        top: 10, left: 10, fontSize: 12, 
+        fill: 'rgba(220, 38, 38, 0.8)', selectable: false, 
+        fontFamily: 'sans-serif',
+        // @ts-ignore
+        id: 'zone'
+      });
+
+      const bottomLabel = new fabric.Text('FOOTER/CTA ZONE - NO TEXT', {
+        top: height - 30, left: 10, fontSize: 12, 
+        fill: 'rgba(220, 38, 38, 0.8)', selectable: false, 
+        fontFamily: 'sans-serif',
+        // @ts-ignore
+        id: 'zone'
+      });
+
+      canvas.add(topZone);
+      canvas.add(bottomZone);
+      canvas.add(topLabel);
+      canvas.add(bottomLabel);
+      
+      // FIX: Use moveObjectTo for Fabric v6 compatibility
+      canvas.moveObjectTo(topZone, 0);
+      canvas.moveObjectTo(bottomZone, 0);
+  };
+
+  // --- SWITCH RATIO ---
+  const handleRatioChange = (ratioName: string) => {
+      if(!fabricCanvas) return;
+      
+      let newWidth = 0;
+      let newHeight = 0;
+      let newName = '';
+
+      if (ratioName === 'CUSTOM') {
+          newWidth = customWidth;
+          newHeight = customHeight;
+          newName = 'Custom';
+          setCurrentRatio({ width: customWidth, height: customHeight, name: 'Custom' });
+      } else {
+          // @ts-ignore
+          const r = RATIOS[ratioName];
+          newWidth = r.width;
+          newHeight = r.height;
+          newName = r.name;
+          setCurrentRatio(r);
+      }
+
+      fabricCanvas.setDimensions({ width: newWidth, height: newHeight });
+      addZones(fabricCanvas, newWidth, newHeight, newName);
+      
+      if(fabricCanvas.backgroundImage instanceof fabric.Image) {
+           scaleBackgroundToCover(fabricCanvas.backgroundImage, fabricCanvas);
+      }
+      setIsCompliant(false); 
+  };
+
+  const applyCustomSize = () => {
+      if(!fabricCanvas) return;
+      handleRatioChange('CUSTOM');
+  };
+
+  // --- 1. UPLOAD IMAGE ---
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !fabricCanvas) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const imgObj = new Image();
+      imgObj.src = event.target?.result as string;
+      imgObj.onload = () => {
+        const imgInstance = new fabric.Image(imgObj);
+        imgInstance.scaleToWidth(200);
+        // Position it safely in the middle
+        imgInstance.set({ top: 250, left: 50 });
+        fabricCanvas.add(imgInstance);
+        fabricCanvas.setActiveObject(imgInstance);
+        fabricCanvas.renderAll();
+        setIsCompliant(false);
+        showStatus("Image Uploaded");
+      }
+    };
+    reader.readAsDataURL(file);
+    if (fileInputRef.current) fileInputRef.current.value = ""; 
+  };
+
+  // --- ADD TEXT FEATURE ---
+  const addText = () => {
+      if(!fabricCanvas) return;
+      const text = new fabric.IText('Your Headline', {
+          fontFamily: 'sans-serif',
+          left: 50, top: 300,
+          fill: '#000000',
+          fontSize: 24
+      });
+      fabricCanvas.add(text);
+      fabricCanvas.setActiveObject(text);
+      setIsCompliant(false);
+  };
+
+  // --- STYLING LOGIC ---
+  const updateStyle = (prop: string, value: any) => {
+      if(!fabricCanvas) return;
+      const active = fabricCanvas.getActiveObject();
+      if(!active) return;
+
+      active.set(prop as keyof fabric.Object, value);
+      fabricCanvas.renderAll();
+      setIsCompliant(false);
+  };
+
+  const toggleBold = () => {
+      if(!fabricCanvas) return;
+      const active = fabricCanvas.getActiveObject();
+      if(active && active.type && active.type.includes('text')) {
+          const isBold = (active as any).fontWeight === 'bold';
+          updateStyle('fontWeight', isBold ? 'normal' : 'bold');
+      }
+  };
+
+  const toggleItalic = () => {
+      if(!fabricCanvas) return;
+      const active = fabricCanvas.getActiveObject();
+      if(active && active.type && active.type.includes('text')) {
+          const isItalic = (active as any).fontStyle === 'italic';
+          updateStyle('fontStyle', isItalic ? 'normal' : 'italic');
+      }
+  };
+
+  const bringForward = () => {
+      if(!fabricCanvas || !selectedObj) return;
+      // FIX: v6 uses bringObjectForward
+      fabricCanvas.bringObjectForward(selectedObj);
+      fabricCanvas.renderAll();
+  };
+
+  const sendBackward = () => {
+      if(!fabricCanvas || !selectedObj) return;
+      // FIX: v6 uses sendObjectBackwards
+      fabricCanvas.sendObjectBackwards(selectedObj);
+      
+      // Ensure zones stay at back
+      const zones = fabricCanvas.getObjects().filter(o => (o as any).id === 'zone');
+      zones.forEach(z => fabricCanvas.moveObjectTo(z, 0));
+      
+      fabricCanvas.renderAll();
+  };
+
+  // --- 2. DELETE OBJECT ---
+  const deleteSelected = () => {
+    if (!fabricCanvas) return;
+    const activeObj = fabricCanvas.getActiveObject();
+    if (activeObj) {
+      fabricCanvas.remove(activeObj);
+      fabricCanvas.discardActiveObject();
+      fabricCanvas.renderAll();
+      setIsCompliant(false);
+      showStatus("Object Deleted");
+    } else {
+        alert("⚠️ Select an object to delete first!");
+    }
+  };
+
+  // --- 3. REMOVE OBJECT BACKGROUND ---
+  const removeBackground = async () => {
+    if (!fabricCanvas) return;
+    const activeObj = fabricCanvas.getActiveObject();
+    if (!activeObj || !(activeObj instanceof fabric.Image)) {
+      alert("⚠️ Select an image first!"); return;
+    }
+    setIsLoading(true);
+    setStatusMsg("Removing Background...");
+
+    const dataURL = activeObj.toDataURL({ format: 'png' });
+    const blob = await (await fetch(dataURL)).blob();
+    const formData = new FormData();
+    formData.append('file', blob, "image.png");
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/tools/remove-bg', { method: 'POST', body: formData });
+      
+      if (response.headers.get("content-type")?.includes("application/json")) {
+         const err = await response.json(); alert(err.message);
+      } else {
+         const imageBlob = await response.blob();
+         const newUrl = URL.createObjectURL(imageBlob);
+         const imgObj = new Image();
+         imgObj.src = newUrl;
+         imgObj.onload = () => {
+            const newInstance = new fabric.Image(imgObj);
+            newInstance.set({ 
+                top: activeObj.top, left: activeObj.left, 
+                scaleX: activeObj.scaleX, scaleY: activeObj.scaleY 
+            });
+            fabricCanvas.remove(activeObj);
+            fabricCanvas.add(newInstance);
+            fabricCanvas.setActiveObject(newInstance);
+            fabricCanvas.renderAll();
+            setIsCompliant(false);
+            showStatus("Background Removed", "success");
+         }
+      }
+    } catch (e) { alert("Server Connection Failed"); }
+    setIsLoading(false);
+  };
+
+  // --- 4. GENERATE SCENE BACKGROUND ---
+  const generateBackground = async () => {
+    if (!fabricCanvas || !prompt) { alert("Enter a prompt!"); return; }
+    setIsLoading(true);
+    setStatusMsg("Dreaming up background...");
+
+    const formData = new FormData();
+    formData.append('prompt', prompt);
+
+    try {
+        const response = await fetch('http://127.0.0.1:8000/tools/generate-bg', { method: 'POST', body: formData });
+
+        if (response.headers.get("content-type")?.includes("application/json")) {
+            const err = await response.json(); alert(err.message);
+        } else {
+            const imageBlob = await response.blob();
+            const newUrl = URL.createObjectURL(imageBlob);
+            const imgObj = new Image();
+            imgObj.src = newUrl;
+            imgObj.onload = () => {
+                const bgImage = new fabric.Image(imgObj);
+                scaleBackgroundToCover(bgImage, fabricCanvas);
+                fabricCanvas.backgroundImage = bgImage;
+                fabricCanvas.renderAll();
+                setIsCompliant(false);
+                showStatus("Background Generated", "success");
+            };
+        }
+    } catch (e) { alert("Server Error"); }
+    setIsLoading(false);
+  };
+
+  const scaleBackgroundToCover = (bgImage: fabric.Image, canvas: fabric.Canvas) => {
+      const canvasAspect = canvas.width! / canvas.height!;
+      const imgAspect = bgImage.width! / bgImage.height!;
+      if (canvasAspect >= imgAspect) {
+          bgImage.scaleToWidth(canvas.width!);
+      } else {
+          bgImage.scaleToHeight(canvas.height!);
+      }
+  };
+
+  const clearBackground = () => {
+      if (!fabricCanvas) return;
+      fabricCanvas.backgroundImage = undefined; 
+      fabricCanvas.backgroundColor = "#ffffff"; 
+      fabricCanvas.renderAll();
+      setIsCompliant(false);
+  };
+
+  // --- 5. COMPLIANCE CHECK (SMART) ---
+  const checkCompliance = async () => {
+    if (!fabricCanvas) return;
+
+    // 1. Visual/Geometric Check (Client Side)
+    const objects = fabricCanvas.getObjects();
+    let geometricFail = false;
+
+    // Only apply Strict Zone rules if we are in Story mode
+    if (currentRatio.name === 'Story (9:16)') {
+        objects.forEach((obj) => {
+            // Ignore background and zones
+            if (obj === fabricCanvas.backgroundImage || (obj as any).id === 'zone') return;
+            
+            // KEY CHANGE: Ignore images! Only block text objects.
+            if (!obj.type?.includes('text')) return;
+
+            const yPos = obj.top || 0;
+            const h = obj.getScaledHeight();
+            const canvasH = fabricCanvas.height || 600;
+
+            // Check Top Zone (200px) & Bottom Zone (250px)
+            if (yPos < 200) geometricFail = true;
+            if (yPos + h > canvasH - 250) geometricFail = true;
+        });
+    }
+
+    if (geometricFail) {
+        showStatus("❌ Failed: TEXT element detected in Safe Zone!", "error");
+        setIsCompliant(false);
+        return;
+    }
+
+    // 2. Text & Content Check (Server Side)
+    setIsLoading(true);
+    setStatusMsg("Analyzing text & claims...");
+    
+    // Higher res for better OCR
+    const dataURL = fabricCanvas.toDataURL({ format: 'png', multiplier: 2 }); 
+    const blob = await (await fetch(dataURL)).blob();
+    
+    const formData = new FormData();
+    formData.append('file', blob, "compliance_check.png");
+
+    try {
+        const response = await fetch('http://127.0.0.1:8000/check-compliance', { 
+            method: 'POST', 
+            body: formData 
+        });
+        
+        const result = await response.json();
+
+        if (result.status === "FAIL") {
+             const msg = result.violations.slice(0, 2).join(", ");
+             showStatus(`❌ ${msg}`, "error");
+             setIsCompliant(false);
+        } else {
+             showStatus("✅ Passed: Retailer Compliant", "success");
+             setIsCompliant(true);
+        }
+    } catch (e) {
+        console.error(e);
+        showStatus("⚠️ Server Error: Check Python Console", "error");
+    }
+    setIsLoading(false);
+  };
+
+  // --- 6. AUTO FIX LAYOUT (SMART) ---
+  const autoFixLayout = () => {
+    if (!fabricCanvas) return;
+    const objects = fabricCanvas.getObjects();
+    const canvasH = fabricCanvas.height || 600;
+
+    if (currentRatio.name !== 'Story (9:16)') {
+        alert("Auto-Fix is only needed for Story mode safe zones.");
+        return;
+    }
+    
+    let movedCount = 0;
+
+    objects.forEach(obj => {
+         if (obj === fabricCanvas.backgroundImage || (obj as any).id === 'zone') return;
+         
+         // Only move TEXT. Leave images alone.
+         if (!obj.type?.includes('text')) return;
+
+         const top = obj.top || 0;
+         const height = obj.getScaledHeight();
+
+         // Fix Top Overlap
+         if (top < 200) {
+             obj.animate('top', 220, { onChange: fabricCanvas.renderAll.bind(fabricCanvas) });
+             movedCount++;
+         }
+         
+         // Fix Bottom Overlap
+         if (top + height > canvasH - 250) {
+             obj.animate('top', canvasH - 250 - height - 20, { onChange: fabricCanvas.renderAll.bind(fabricCanvas) });
+             movedCount++;
+         }
+    });
+    
+    if (movedCount > 0) {
+        showStatus(`✨ Moved ${movedCount} text items to safety!`, "success");
+    } else {
+        showStatus("✨ Layout looks safe already.", "success");
+    }
+    setIsCompliant(false); 
+  };
+
+  // --- 7. DOWNLOAD ---
+  const downloadImage = (multiplier: number, label: string) => {
+      if (!isCompliant) {
+          alert("🔒 COMPLIANCE LOCK ACTIVE\nPlease run check compliance first.");
+          return;
+      }
+      if (!fabricCanvas) return;
+      
+      const objects = fabricCanvas.getObjects();
+      objects.forEach(obj => { if ((obj as any).id === 'zone') obj.set('visible', false); });
+      
+      let quality = 0.9;
+      let dataURL = fabricCanvas.toDataURL({
+          format: 'jpeg', quality: quality, multiplier: multiplier,
+      });
+
+      while (dataURL.length > 680000 && quality > 0.1) {
+          quality -= 0.1;
+          dataURL = fabricCanvas.toDataURL({
+              format: 'jpeg', quality: quality, multiplier: multiplier,
+          });
+      }
+
+      objects.forEach(obj => { if ((obj as any).id === 'zone') obj.set('visible', true); });
+      fabricCanvas.renderAll();
+
+      const link = document.createElement('a');
+      link.download = `retail-gen-${label}-${Date.now()}.jpg`;
+      link.href = dataURL;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+  };
+
+  // --- STYLES ---
+  const sectionTitleStyle = { color: '#888', fontSize: '11px', fontWeight: 'bold', letterSpacing: '1px', marginBottom: '10px', textTransform: 'uppercase' as const };
+  const buttonStyle = { 
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', width: '100%', 
+      padding: '12px', background: '#27272a', border: '1px solid #3f3f46', 
+      color: '#e4e4e7', cursor: 'pointer', borderRadius: '6px', fontSize: '13px', transition: '0.2s' 
+  };
+  const activeButtonStyle = { ...buttonStyle, background: '#dc2626', borderColor: '#ef4444', color: 'white' };
+  
+  const downloadBtnStyle = (multiplier: number) => ({
+      ...buttonStyle,
+      opacity: isCompliant ? 1 : 0.4,
+      cursor: isCompliant ? 'pointer' : 'not-allowed',
+      background: isCompliant ? '#059669' : '#27272a',
+      borderColor: isCompliant ? '#10b981' : '#3f3f46'
+  });
+
+  return (
+    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#09090b', color: 'white', fontFamily: 'sans-serif' }}>
+      
+      {/* SIDEBAR */}
+      <div style={{ width: '340px', padding: '20px', backgroundColor: '#18181b', borderRight: '1px solid #27272a', display: 'flex', flexDirection: 'column', gap: '20px', overflowY: 'auto' }}>
+        
+        {/* HEADER */}
+        <div>
+            <h1 style={{ fontSize: '22px', fontWeight: '800', color: '#ef4444' }}>
+                RetailGen Studio
+            </h1>
+            <p style={{ color: '#71717a', fontSize: '12px', marginTop: '4px' }}>Enterprise Compliance Edition</p>
+        </div>
+
+        {/* 1. SETUP */}
+        <div>
+            <div style={sectionTitleStyle}>1. Canvas Setup</div>
+            <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                {Object.keys(RATIOS).filter(k => k !== 'CUSTOM').map((key) => {
+                    // @ts-ignore
+                    const r = RATIOS[key];
+                    return (
+                        <button 
+                            key={r.name}
+                            onClick={() => handleRatioChange(key)}
+                            style={{ ...buttonStyle, flex: 1, fontSize: '10px', background: currentRatio.name === r.name ? '#3f3f46' : '#18181b', border: currentRatio.name === r.name ? '1px solid #ef4444' : '1px solid #3f3f46' }}
+                        >
+                            {r.name}
+                        </button>
+                    )
+                })}
+                <button 
+                    onClick={() => handleRatioChange('CUSTOM')}
+                    style={{ ...buttonStyle, flex: 1, fontSize: '10px', background: currentRatio.name === 'Custom' ? '#3f3f46' : '#18181b', border: currentRatio.name === 'Custom' ? '1px solid #ef4444' : '1px solid #3f3f46' }}
+                >
+                    Custom
+                </button>
+            </div>
+        </div>
+
+        {/* 2. IMPORT */}
+        <div>
+            <div style={sectionTitleStyle}>2. Assets</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={handleImageUpload} accept="image/*" />
+                <button onClick={() => fileInputRef.current?.click()} style={buttonStyle}>
+                   <UploadIcon /> Upload Image
+                </button>
+
+                <button onClick={addText} style={buttonStyle}>
+                   <TextIcon /> Add Text
+                </button>
+                
+                <div style={{ display: 'flex', gap: '5px' }}>
+                    <button onClick={removeBackground} style={{...buttonStyle, flex: 2, background: '#2563eb', borderColor: '#3b82f6'}}>
+                    <ScissorsIcon /> Remove BG
+                    </button>
+                    <button onClick={deleteSelected} style={{...buttonStyle, flex: 1, background: '#7f1d1d', borderColor: '#991b1b', color: '#fca5a5'}}>
+                    <TrashIcon />
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        {/* --- DYNAMIC EDIT PANEL --- */}
+        {selectedObj && (
+            <div style={{ padding: '15px', background: '#27272a', borderRadius: '8px', border: '1px solid #3f3f46' }}>
+                <div style={{...sectionTitleStyle, color: '#ef4444', display:'flex', justifyContent:'space-between'}}>
+                    <span>Edit Selection</span>
+                    <button onClick={deleteSelected} style={{background:'transparent', border:'none', color:'#ef4444', cursor:'pointer'}}><TrashIcon /></button>
+                </div>
+
+                {/* TEXT SPECIFIC CONTROLS */}
+                {selectedObj.type && selectedObj.type.includes('text') && (
+                    <div style={{display:'flex', flexDirection:'column', gap:'10px', marginBottom:'10px'}}>
+                        <div style={{display:'flex', gap:'5px'}}>
+                            <input type="color" 
+                                value={selectedObj.fill as string || '#000000'} 
+                                onChange={(e) => updateStyle('fill', e.target.value)}
+                                style={{height:'35px', width:'40px', border:'none', background:'none', cursor:'pointer'}} 
+                            />
+                            <input type="number" 
+                                value={selectedObj.fontSize || 24} 
+                                onChange={(e) => updateStyle('fontSize', parseInt(e.target.value))}
+                                style={{flex:1, background:'#18181b', border:'1px solid #3f3f46', color:'white', borderRadius:'4px', paddingLeft:'10px'}}
+                            />
+                        </div>
+                        <div style={{display:'flex', gap:'5px'}}>
+                            <button onClick={toggleBold} style={{...buttonStyle, flex:1, fontWeight:'bold'}}>B</button>
+                            <button onClick={toggleItalic} style={{...buttonStyle, flex:1, fontStyle:'italic'}}>I</button>
+                        </div>
+                        <select 
+                            value={selectedObj.fontFamily || 'Arial'}
+                            onChange={(e) => updateStyle('fontFamily', e.target.value)}
+                            style={{width: '100%', padding: '8px', background: '#18181b', border: '1px solid #3f3f46', color: 'white', borderRadius: '4px'}}
+                        >
+                            <option value="Arial">Arial</option>
+                            <option value="Times New Roman">Times New Roman</option>
+                            <option value="Courier New">Courier New</option>
+                            <option value="Verdana">Verdana</option>
+                        </select>
+                    </div>
+                )}
+
+                {/* LAYERS & TOOLS */}
+                <div style={{display:'flex', gap:'5px', marginTop:'5px'}}>
+                     <button onClick={bringForward} style={{...buttonStyle, fontSize:'10px'}}><LayersIcon /> Up</button>
+                     <button onClick={sendBackward} style={{...buttonStyle, fontSize:'10px'}}><LayersIcon /> Down</button>
+                     <button onClick={removeBackground} style={{...buttonStyle, fontSize:'10px'}}><ScissorsIcon /> Cut BG</button>
+                </div>
+            </div>
+        )}
+        {/* --- END EDIT PANEL --- */}
+
+        {/* 3. GENERATE */}
+        <div>
+            <div style={sectionTitleStyle}>3. AI Studio</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <textarea 
+                    placeholder="Describe background..." 
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    style={{ width: '100%', padding: '10px', background: '#27272a', color: 'white', border: '1px solid #3f3f46', borderRadius: '6px', height: '70px', fontSize: '13px', resize: 'none', outline: 'none' }}
+                />
+                <div style={{ display: 'flex', gap: '8px' }}>
+                    <button onClick={generateBackground} style={activeButtonStyle}>
+                        <SparklesIcon /> Generate
+                    </button>
+                    <button onClick={clearBackground} style={{ ...buttonStyle, width: 'auto', background: '#27272a' }} title="Clear BG">
+                        ❌
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        {/* 4. COMPLIANCE */}
+        <div style={{ padding: '15px', background: isCompliant ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)', border: isCompliant ? '1px solid #059669' : '1px solid #ef4444', borderRadius: '8px' }}>
+            <div style={{...sectionTitleStyle, color: isCompliant ? '#34d399' : '#f87171'}}>4. Compliance Check</div>
+            <button onClick={checkCompliance} style={{ ...buttonStyle, background: isCompliant ? '#059669' : '#ef4444', borderColor: 'transparent', color: 'white', fontWeight: 'bold' }}>
+                {isCompliant ? <CheckCircleIcon /> : <ShieldAlertIcon />} 
+                {isCompliant ? "Compliant & Unlocked" : "Check Compliance"}
+            </button>
+            
+            {/* MAGIC FIX BUTTON (Only shows if not compliant AND in Story mode) */}
+            {!isCompliant && currentRatio.name === 'Story (9:16)' && (
+                <button onClick={autoFixLayout} style={{ ...buttonStyle, marginTop: '10px', background: '#f59e0b', color: 'black', border: 'none', fontWeight: 'bold' }}>
+                    ✨ Magic Auto-Fix Layout
+                </button>
+            )}
+
+            <p style={{ fontSize: '10px', marginTop: '8px', color: '#a1a1aa', textAlign: 'center' }}>
+                {isCompliant ? "Download enabled." : "Downloads locked until check passes."}
+            </p>
+        </div>
+
+        {/* 5. EXPORT */}
+        <div style={{ marginTop: 'auto' }}>
+            <div style={sectionTitleStyle}>5. Export (Resolutions)</div>
+            <div style={{ display: 'flex', gap: '5px' }}>
+                <button onClick={() => downloadImage(1, 'SD')} style={downloadBtnStyle(1)}>SD</button>
+                <button onClick={() => downloadImage(2, 'HD')} style={downloadBtnStyle(2)}>HD</button>
+                <button onClick={() => downloadImage(4, '4K')} style={downloadBtnStyle(4)}>4K</button>
+            </div>
+        </div>
+
+      </div>
+
+      {/* WORKSPACE */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', position: 'relative', backgroundColor: '#09090b', backgroundImage: 'radial-gradient(#27272a 1px, transparent 1px)', backgroundSize: '24px 24px', overflow: 'hidden' }}>
+        
+        {statusMsg && (
+            <div style={{ 
+                position: 'absolute', top: 30, 
+                background: '#fafafa', color: '#18181b', 
+                padding: '10px 20px', borderRadius: '30px', 
+                fontSize: '14px', fontWeight: 'bold', 
+                boxShadow: '0 10px 25px rgba(0,0,0,0.5)', 
+                animation: 'slideDown 0.3s',
+                display: 'flex', alignItems: 'center', gap: '10px',
+                zIndex: 100
+            }}>
+                {statusMsg}
+            </div>
+        )}
+
+        {isLoading && (
+            <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', zIndex: 50, backdropFilter: 'blur(5px)' }}>
+                <div style={{ width: '50px', height: '50px', border: '4px solid #ef4444', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }}></div>
+                <p style={{ marginTop: '20px', fontWeight: 'bold', color: 'white', letterSpacing: '1px' }}>PROCESSING...</p>
+            </div>
+        )}
+
+        {/* Canvas Area with Auto-Scaling Container */}
+        <div style={{ 
+            boxShadow: '0 0 0 1px #333, 0 20px 60px -10px rgba(0,0,0,0.6)', 
+            transition: '0.3s',
+            transform: currentRatio.width > 800 ? 'scale(0.6)' : 'scale(1)',
+        }}>
+             <canvas ref={canvasRef} />
+        </div>
+        
+        <div style={{ marginTop: '20px', display: 'flex', gap: '20px', color: '#52525b', fontSize: '12px' }}>
+            <span>Size: {currentRatio.width}x{currentRatio.height}</span>
+            <span>Zoom: {currentRatio.width > 800 ? '60%' : '100%'}</span>
+        </div>
+      </div>
+
+      <style jsx global>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes slideDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
+    </div>
+  );
+}
+
+// ⚠️ IMPORTANT: Explicit Default Export for Next.js App Router
+export default Home;
