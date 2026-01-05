@@ -27,7 +27,7 @@ except ImportError as e:
     sys.exit(1)
 
 # --- 3. API KEY SETUP ---
-GEMINI_API_KEY = "AIzaSyA4c3yqT_pJWlpk9ngVILau1r5odOKnaTk" 
+GEMINI_API_KEY = "Pls enter your key here" 
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
